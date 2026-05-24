@@ -257,7 +257,7 @@ The interactive TUI mode provides:
   - `c/d/t`: Sort by cost/date/tokens
   - `j`: Jump to today
   - `s`: Open source picker dialog
-  - `g`: Open group-by picker dialog (model, client+model, client+provider+model)
+  - `g`: Open group-by picker dialog (model, client+model, client+provider+model, workspace+model, session+model, client+session+model)
   - `h`: Toggle Daily/Hourly chart granularity (Overview tab)
   - `v`: Toggle Table/Profile view (Hourly tab)
   - `y`: Copy selected row to clipboard
@@ -278,6 +278,9 @@ Press `g` in the TUI or use `--group-by` in `--light`/`--json` mode to control h
 | **Model** | `--group-by model` | ✅ | One row per model — merges all clients and providers |
 | **Client + Model** | `--group-by client,model` | | One row per client-model pair |
 | **Client + Provider + Model** | `--group-by client,provider,model` | | Most granular — no merging |
+| **Workspace + Model** | `--group-by workspace,model` | | Group local usage by workspace key, then model |
+| **Session + Model** | `--group-by session,model` | | One row per `session_id` and model — attribute cost to a specific agent-CLI session |
+| **Client + Session + Model** | `--group-by client,session,model` | | One row per client, session, and model — useful for multi-agent runners that join on `session_id` |
 
 **`--group-by model`** (most consolidated)
 
@@ -300,6 +303,33 @@ Press `g` in the TUI or use `--group-by` in `--light`/`--json` mode to control h
 | OpenCode | github-copilot | claude-opus-4-5 | $1,200 |
 | OpenCode | anthropic | claude-opus-4-5 | $168 |
 | Claude | anthropic | claude-opus-4-5 | $970 |
+
+**`--group-by session,model`** (per-session cost attribution)
+
+`tokscale models --json --group-by session,model` emits one entry per `(session_id, model)`. Each entry includes a top-level `sessionId` field so downstream tools (e.g. multi-agent IDEs) can join cost data back to a specific agent-CLI session:
+
+```json
+{
+  "groupBy": "session,model",
+  "entries": [
+    {
+      "sessionId": "019e1e27-af49-7cd1-89b7-7bad1c3f3be2",
+      "client": "codex",
+      "provider": "openai",
+      "model": "gpt-5",
+      "input": 25251,
+      "output": 47,
+      "cacheRead": 1920,
+      "cacheWrite": 0,
+      "reasoning": 40,
+      "messageCount": 12,
+      "cost": 0.0123
+    }
+  ]
+}
+```
+
+Use `--group-by client,session,model` when you also need the client name on every row (one spawn across all 20+ supported CLIs at once).
 
 ### Filtering by Platform
 

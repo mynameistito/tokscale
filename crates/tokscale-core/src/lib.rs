@@ -124,6 +124,8 @@ pub enum GroupBy {
     ClientModel,
     ClientProviderModel,
     WorkspaceModel,
+    Session,
+    ClientSession,
 }
 
 impl std::fmt::Display for GroupBy {
@@ -133,6 +135,8 @@ impl std::fmt::Display for GroupBy {
             GroupBy::ClientModel => write!(f, "client,model"),
             GroupBy::ClientProviderModel => write!(f, "client,provider,model"),
             GroupBy::WorkspaceModel => write!(f, "workspace,model"),
+            GroupBy::Session => write!(f, "session,model"),
+            GroupBy::ClientSession => write!(f, "client,session,model"),
         }
     }
 }
@@ -147,8 +151,12 @@ impl std::str::FromStr for GroupBy {
             "client,model" | "client-model" => Ok(GroupBy::ClientModel),
             "client,provider,model" | "client-provider-model" => Ok(GroupBy::ClientProviderModel),
             "workspace,model" | "workspace-model" => Ok(GroupBy::WorkspaceModel),
+            "session" | "session,model" | "session-model" => Ok(GroupBy::Session),
+            "client,session" | "client-session" | "client,session,model" | "client-session-model" => {
+                Ok(GroupBy::ClientSession)
+            }
             _ => Err(format!(
-                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model",
+                "Invalid group-by value: '{}'. Valid options: model, client,model, client,provider,model, workspace,model, session,model, client,session,model",
                 s
             )),
         }
@@ -235,14 +243,14 @@ pub struct LocalParseOptions {
     pub scanner_settings: scanner::ScannerSettings,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DailyTotals {
     pub tokens: i64,
     pub cost: f64,
     pub messages: i32,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ClientContribution {
     pub client: String,
     pub model_id: String,
@@ -259,6 +267,24 @@ pub struct DailyContribution {
     pub intensity: u8,
     pub token_breakdown: TokenBreakdown,
     pub clients: Vec<ClientContribution>,
+}
+
+/// Per-session aggregate of token usage, cost, and timing — keyed on
+/// `session_id` so downstream consumers can attribute cost to a specific
+/// agent-CLI session rather than just a date or model rollup.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SessionContribution {
+    pub session_id: String,
+    pub client: String,
+    pub provider: String,
+    pub model: String,
+    pub totals: DailyTotals,
+    pub token_breakdown: TokenBreakdown,
+    pub clients: Vec<ClientContribution>,
+    /// Earliest message timestamp (unix seconds) in the session.
+    pub first_seen: i64,
+    /// Latest message timestamp (unix seconds) in the session.
+    pub last_seen: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -319,6 +345,7 @@ pub struct ModelUsage {
     pub merged_clients: Option<String>,
     pub workspace_key: Option<String>,
     pub workspace_label: Option<String>,
+    pub session_id: Option<String>,
     pub model: String,
     pub provider: String,
     pub input: i64,
@@ -1275,8 +1302,13 @@ fn aggregate_model_usage_entries(
                 format!("{}:{}:{}", msg.client, msg.provider_id, normalized)
             }
             GroupBy::WorkspaceModel => format!("{}:{}", workspace_group_key, normalized),
+            GroupBy::Session => format!("{}:{}", msg.session_id, normalized),
+            GroupBy::ClientSession => {
+                format!("{}:{}:{}", msg.client, msg.session_id, normalized)
+            }
         };
         let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);
+        let session_grouped = matches!(group_by, GroupBy::Session | GroupBy::ClientSession);
         let entry = model_map.entry(key).or_insert_with(|| ModelUsage {
             client: msg.client.clone(),
             merged_clients: if merge_clients {
@@ -1291,6 +1323,11 @@ fn aggregate_model_usage_entries(
             },
             workspace_label: if matches!(group_by, GroupBy::WorkspaceModel) {
                 Some(workspace_label.clone())
+            } else {
+                None
+            },
+            session_id: if session_grouped {
+                Some(msg.session_id.clone())
             } else {
                 None
             },
@@ -2517,6 +2554,27 @@ mod tests {
             GroupBy::from_str("workspace-model").unwrap(),
             GroupBy::WorkspaceModel
         );
+        assert_eq!(GroupBy::from_str("session").unwrap(), GroupBy::Session);
+        assert_eq!(
+            GroupBy::from_str("session,model").unwrap(),
+            GroupBy::Session
+        );
+        assert_eq!(
+            GroupBy::from_str("session-model").unwrap(),
+            GroupBy::Session
+        );
+        assert_eq!(
+            GroupBy::from_str("client,session").unwrap(),
+            GroupBy::ClientSession
+        );
+        assert_eq!(
+            GroupBy::from_str("client,session,model").unwrap(),
+            GroupBy::ClientSession
+        );
+        assert_eq!(
+            GroupBy::from_str("client-session-model").unwrap(),
+            GroupBy::ClientSession
+        );
         assert!(GroupBy::from_str("unknown").is_err());
     }
 
@@ -2532,6 +2590,8 @@ mod tests {
             GroupBy::ClientModel,
             GroupBy::ClientProviderModel,
             GroupBy::WorkspaceModel,
+            GroupBy::Session,
+            GroupBy::ClientSession,
         ];
 
         for variant in variants {
@@ -2770,6 +2830,135 @@ mod tests {
                 && entry.workspace_label.as_deref() == Some(UNKNOWN_WORKSPACE_LABEL)
                 && (entry.cost - 2.0).abs() < f64::EPSILON
         }));
+    }
+
+    #[test]
+    fn test_session_grouping_merges_same_session_and_model() {
+        // Two messages with the same session_id + same model — should collapse
+        // into one row regardless of the client that produced them, because
+        // GroupBy::Session keys on (session_id, model) only.
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    1.25,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "amp",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    2.75,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::Session,
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id.as_deref(), Some("session-shared"));
+        assert_eq!(entries[0].model, "claude-sonnet-4-5");
+        assert!((entries[0].cost - 4.0).abs() < f64::EPSILON);
+        assert_eq!(entries[0].message_count, 2);
+        assert!(entries[0].workspace_key.is_none());
+        assert!(entries[0].workspace_label.is_none());
+        // Session grouping does not merge_clients into a comma list.
+        assert!(entries[0].merged_clients.is_none());
+    }
+
+    #[test]
+    fn test_session_grouping_separates_different_sessions() {
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message("codex", "gpt-5", "openai", "session-a", 1.0, None, None),
+                make_workspace_message("codex", "gpt-5", "openai", "session-b", 2.0, None, None),
+            ],
+            &GroupBy::Session,
+        );
+
+        assert_eq!(entries.len(), 2);
+        let session_ids: HashSet<_> = entries
+            .iter()
+            .map(|e| e.session_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(session_ids, HashSet::from(["session-a", "session-b"]));
+    }
+
+    #[test]
+    fn test_client_session_grouping_keeps_clients_separate() {
+        // Same session_id seen by two different clients (unusual in practice
+        // but possible if parsers collide on an id space). ClientSession
+        // must yield two rows; Session would yield one (covered above).
+        let entries = aggregate_model_usage_entries(
+            vec![
+                make_workspace_message(
+                    "claude",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    1.0,
+                    None,
+                    None,
+                ),
+                make_workspace_message(
+                    "amp",
+                    "claude-sonnet-4-5-20250929",
+                    "anthropic",
+                    "session-shared",
+                    3.0,
+                    None,
+                    None,
+                ),
+            ],
+            &GroupBy::ClientSession,
+        );
+
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert_eq!(entry.session_id.as_deref(), Some("session-shared"));
+            assert!(entry.merged_clients.is_none());
+        }
+        let by_client: HashSet<_> = entries.iter().map(|e| e.client.as_str()).collect();
+        assert_eq!(by_client, HashSet::from(["claude", "amp"]));
+    }
+
+    #[test]
+    fn test_non_session_grouping_does_not_populate_session_id() {
+        // Defensive: only Session/ClientSession variants should set the
+        // session_id field on ModelUsage — every other group_by must leave
+        // it None so the camelCase JSON output omits it via
+        // `skip_serializing_if = "Option::is_none"`.
+        for group_by in &[
+            GroupBy::Model,
+            GroupBy::ClientModel,
+            GroupBy::ClientProviderModel,
+            GroupBy::WorkspaceModel,
+        ] {
+            let entries = aggregate_model_usage_entries(
+                vec![make_workspace_message(
+                    "codex",
+                    "gpt-5",
+                    "openai",
+                    "session-x",
+                    1.0,
+                    None,
+                    None,
+                )],
+                group_by,
+            );
+            assert_eq!(entries.len(), 1);
+            assert!(
+                entries[0].session_id.is_none(),
+                "session_id leaked into {:?} grouping",
+                group_by
+            );
+        }
     }
 
     #[test]

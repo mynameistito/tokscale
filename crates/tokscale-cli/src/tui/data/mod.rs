@@ -208,7 +208,9 @@ fn daily_source_model_key(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_daily_key(workspace_group_key, model),
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
+            model.to_string()
+        }
     }
 }
 
@@ -221,28 +223,42 @@ fn daily_source_model_display_name(
     match group_by {
         GroupBy::WorkspaceModel => workspace_model_display_label(workspace_label, model),
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
-        GroupBy::Model | GroupBy::ClientModel => model.to_string(),
+        GroupBy::Model | GroupBy::ClientModel | GroupBy::Session | GroupBy::ClientSession => {
+            model.to_string()
+        }
     }
 }
 
 fn model_color_key(group_by: &GroupBy, _provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => model.to_string(),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
 fn hourly_model_key(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => format!("{provider_id}:{model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
 fn hourly_model_display_name(group_by: &GroupBy, provider_id: &str, model: &str) -> String {
     match group_by {
         GroupBy::ClientProviderModel => format!("{provider_id} / {model}"),
-        GroupBy::Model | GroupBy::ClientModel | GroupBy::WorkspaceModel => model.to_string(),
+        GroupBy::Model
+        | GroupBy::ClientModel
+        | GroupBy::WorkspaceModel
+        | GroupBy::Session
+        | GroupBy::ClientSession => model.to_string(),
     }
 }
 
@@ -402,6 +418,10 @@ impl DataLoader {
                 }
                 GroupBy::WorkspaceModel => {
                     format!("{}:{}", workspace_group_key, normalized_model)
+                }
+                GroupBy::Session => format!("{}:{}", msg.session_id, normalized_model),
+                GroupBy::ClientSession => {
+                    format!("{}:{}:{}", msg.client, msg.session_id, normalized_model)
                 }
             };
             let merge_clients = matches!(group_by, GroupBy::Model | GroupBy::WorkspaceModel);

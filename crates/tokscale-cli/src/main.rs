@@ -79,7 +79,7 @@ struct Cli {
         long,
         value_name = "STRATEGY",
         default_value = "client,model",
-        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model"
+        help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model, session,model, client,session,model"
     )]
     group_by: String,
 
@@ -105,7 +105,7 @@ enum Commands {
             long,
             value_name = "STRATEGY",
             default_value = "client,model",
-            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model"
+            help = "Grouping strategy for --light and --json output: model, client,model, client,provider,model, workspace,model, session,model, client,session,model"
         )]
         group_by: String,
         #[arg(
@@ -1522,6 +1522,8 @@ fn run_models_report(
             workspace_key: Option<serde_json::Value>,
             #[serde(skip_serializing_if = "Option::is_none")]
             workspace_label: Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            session_id: Option<String>,
             model: String,
             provider: String,
             input: i64,
@@ -1564,6 +1566,11 @@ fn run_models_report(
                     },
                     workspace_label: if group_by == GroupBy::WorkspaceModel {
                         e.workspace_label
+                    } else {
+                        None
+                    },
+                    session_id: if matches!(group_by, GroupBy::Session | GroupBy::ClientSession) {
+                        e.session_id
                     } else {
                         None
                     },
@@ -1723,6 +1730,74 @@ fn run_models_report(
                             .set_alignment(CellAlignment::Right),
                     ]);
                 }
+                GroupBy::Session | GroupBy::ClientSession => {
+                    let show_client = group_by == GroupBy::ClientSession;
+                    let mut header = Vec::with_capacity(6);
+                    if show_client {
+                        header.push(Cell::new("Client").fg(Color::Cyan));
+                    }
+                    header.extend([
+                        Cell::new("Session").fg(Color::Cyan),
+                        Cell::new("Model").fg(Color::Cyan),
+                        Cell::new("Total").fg(Color::Cyan),
+                        Cell::new("Cost").fg(Color::Cyan),
+                    ]);
+                    table.set_header(header);
+
+                    for entry in &report.entries {
+                        let total_tokens =
+                            entry.input + entry.output + entry.cache_read + entry.cache_write;
+                        let session_label = entry
+                            .session_id
+                            .clone()
+                            .unwrap_or_else(|| "(unknown)".to_string());
+                        let mut row = Vec::with_capacity(6);
+                        if show_client {
+                            row.push(Cell::new(capitalize_client(&entry.client)));
+                        }
+                        row.extend([
+                            Cell::new(session_label),
+                            Cell::new(&entry.model),
+                            Cell::new(format_tokens_with_commas(total_tokens))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_currency(entry.cost))
+                                .set_alignment(CellAlignment::Right),
+                        ]);
+                        table.add_row(row);
+                    }
+
+                    let total_all = report.total_input
+                        + report.total_output
+                        + report.total_cache_read
+                        + report.total_cache_write;
+                    let mut total_row = Vec::with_capacity(6);
+                    if show_client {
+                        total_row.push(
+                            Cell::new("Total")
+                                .fg(Color::Yellow)
+                                .add_attribute(Attribute::Bold),
+                        );
+                        total_row.push(Cell::new(""));
+                    } else {
+                        total_row.push(
+                            Cell::new("Total")
+                                .fg(Color::Yellow)
+                                .add_attribute(Attribute::Bold),
+                        );
+                    }
+                    total_row.push(Cell::new(""));
+                    total_row.push(
+                        Cell::new(format_tokens_with_commas(total_all))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    );
+                    total_row.push(
+                        Cell::new(format_currency(report.total_cost))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    );
+                    table.add_row(total_row);
+                }
                 GroupBy::WorkspaceModel => {
                     table.set_header(vec![
                         Cell::new("Workspace").fg(Color::Cyan),
@@ -1829,6 +1904,94 @@ fn run_models_report(
                             .fg(Color::Yellow)
                             .set_alignment(CellAlignment::Right),
                     ]);
+                }
+                GroupBy::Session | GroupBy::ClientSession => {
+                    let show_client = group_by == GroupBy::ClientSession;
+                    let mut header = Vec::with_capacity(9);
+                    if show_client {
+                        header.push(Cell::new("Client").fg(Color::Cyan));
+                    }
+                    header.extend([
+                        Cell::new("Session").fg(Color::Cyan),
+                        Cell::new("Provider").fg(Color::Cyan),
+                        Cell::new("Model").fg(Color::Cyan),
+                        Cell::new("Input").fg(Color::Cyan),
+                        Cell::new("Output").fg(Color::Cyan),
+                        Cell::new("Total").fg(Color::Cyan),
+                        Cell::new("Cost").fg(Color::Cyan),
+                        Cell::new("Cost/1M").fg(Color::Cyan),
+                    ]);
+                    table.set_header(header);
+
+                    for entry in &report.entries {
+                        let total =
+                            entry.input + entry.output + entry.cache_write + entry.cache_read;
+                        let session_label = entry
+                            .session_id
+                            .clone()
+                            .unwrap_or_else(|| "(unknown)".to_string());
+                        let mut row = Vec::with_capacity(9);
+                        if show_client {
+                            row.push(Cell::new(capitalize_client(&entry.client)));
+                        }
+                        row.extend([
+                            Cell::new(session_label),
+                            Cell::new(&entry.provider).add_attribute(Attribute::Dim),
+                            Cell::new(&entry.model),
+                            Cell::new(format_tokens_with_commas(entry.input))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(entry.output))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_tokens_with_commas(total))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_currency(entry.cost))
+                                .set_alignment(CellAlignment::Right),
+                            Cell::new(format_cost_per_million(entry.cost, total))
+                                .set_alignment(CellAlignment::Right),
+                        ]);
+                        table.add_row(row);
+                    }
+
+                    let total_all = report.total_input
+                        + report.total_output
+                        + report.total_cache_write
+                        + report.total_cache_read;
+                    let mut total_row: Vec<Cell> = Vec::with_capacity(9);
+                    total_row.push(
+                        Cell::new("Total")
+                            .fg(Color::Yellow)
+                            .add_attribute(Attribute::Bold),
+                    );
+                    let blanks = if show_client { 3 } else { 2 };
+                    for _ in 0..blanks {
+                        total_row.push(Cell::new(""));
+                    }
+                    total_row.push(
+                        Cell::new(format_tokens_with_commas(report.total_input))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    );
+                    total_row.push(
+                        Cell::new(format_tokens_with_commas(report.total_output))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    );
+                    total_row.push(
+                        Cell::new(format_tokens_with_commas(total_all))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    );
+                    total_row.push(
+                        Cell::new(format_currency(report.total_cost))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    );
+                    total_row.push(
+                        Cell::new(format_cost_per_million(report.total_cost, total_all))
+                            .fg(Color::Yellow)
+                            .set_alignment(CellAlignment::Right),
+                    );
+                    table.add_row(total_row);
                 }
                 GroupBy::ClientModel | GroupBy::ClientProviderModel => {
                     table.set_header(vec![
