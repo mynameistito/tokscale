@@ -6,6 +6,7 @@ import { authenticatePersonalToken } from "@/lib/auth/personalTokens";
 import { db, submissions, submittedDevices } from "@/lib/db";
 import { normalizeUsernameCacheKey, revalidateUsernamePaths } from "@/lib/db/usernameLookup";
 import { getBearerToken } from "../../../../lib/auth/bearerToken";
+import { revalidateUserGroupLeaderboards } from "@/lib/groups/cache";
 
 async function resolveUser(request: Request): Promise<{ id: string; username: string } | null> {
   const token = getBearerToken(request.headers.get("Authorization"));
@@ -44,9 +45,8 @@ export async function DELETE(request: Request) {
       return deleted;
     });
 
+    const usernameCacheKey = normalizeUsernameCacheKey(user.username);
     try {
-      const usernameCacheKey = normalizeUsernameCacheKey(user.username);
-
       revalidateTag("leaderboard", "max");
       revalidateTag(`user:${usernameCacheKey}`, "max");
       revalidateTag("user-rank", "max");
@@ -54,12 +54,22 @@ export async function DELETE(request: Request) {
       revalidateTag(`embed-user:${usernameCacheKey}`, "max");
       revalidateTag(`embed-user:${usernameCacheKey}:tokens`, "max");
       revalidateTag(`embed-user:${usernameCacheKey}:cost`, "max");
+    } catch (cacheError) {
+      console.error("Public cache invalidation failed after deletion:", cacheError);
+    }
 
+    try {
+      await revalidateUserGroupLeaderboards(user.id);
+    } catch (cacheError) {
+      console.error("Group cache invalidation failed after deletion:", cacheError);
+    }
+
+    try {
       revalidatePath("/leaderboard");
       revalidatePath("/profile");
       revalidateUsernamePaths(user.username);
     } catch (cacheError) {
-      console.error("Cache invalidation failed after deletion:", cacheError);
+      console.error("Path revalidation failed after deletion:", cacheError);
     }
 
     return NextResponse.json({
